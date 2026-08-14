@@ -313,8 +313,15 @@ static inline int32_t gwf_extend1(int32_t d, int32_t k, int32_t vl, const char *
 #else
 	uint64_t cmp = 0;
 	while (k + 7 < max_k) {
-		uint64_t x = *(uint64_t*)(ts_ + k); // warning: unaligned memory access
-		uint64_t y = *(uint64_t*)(qs_ + k);
+		uint64_t x, y;
+		/* TRACEON/port note (upstream bug workaround): the raw unaligned u64
+		 * casts below are read through char* at arbitrary offsets; GCC 16
+		 * vectorizes them into 16-byte ALIGNED SSE loads (movdqa) at -O3,
+		 * which SIGSEGV on unaligned addresses (reproducible on this box with
+		 * minigraph's own test/MT.gfa). memcpy compiles to a plain unaligned
+		 * load and cannot be miscompiled this way. Behavior is unchanged. */
+		memcpy(&x, ts_ + k, 8);
+		memcpy(&y, qs_ + k, 8);
 		cmp = x ^ y;
 		if (cmp == 0) k += 8;
 		else break;

@@ -3,3 +3,4 @@
 *.a
 Makefile.bak
 minigraph
+.build_flags

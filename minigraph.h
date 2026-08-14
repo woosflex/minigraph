@@ -95,6 +95,16 @@ typedef struct {
 	gfa_edseq_t *es;
 	int32_t b, w, k, flag, n_seg;
 	struct mg_idx_bucket_s *B; // index (hidden)
+#ifdef TRACEON_BACKEND
+	/* tcache v2 state (mg_traceon_cache.c): when nonzero, the per-bucket
+	 * tables (fe/bm/cap/ne + p arrays) live inside an mmap'd .tgcache file;
+	 * the graph (g) and edseq (es) are heap-reconstructed copies — the graph
+	 * is owned by g_own (freed by mg_idx_destroy), es by the destroy path. */
+	int is_tcache;
+	void *tcache_map; // mmap base (munmap on destroy)
+	int64_t tcache_size;
+	gfa_t *g_own;     // tcache load: reconstructed graph (NULL otherwise)
+#endif
 } mg_idx_t;
 
 typedef struct {
@@ -170,7 +180,14 @@ mg_gchains_t *mg_map(const mg_idx_t *gi, int qlen, const char *seq, mg_tbuf_t *b
 void mg_map_frag(const mg_idx_t *gi, int n_segs, const int *qlens, const char **seqs, mg_gchains_t **gcs, mg_tbuf_t *b, const mg_mapopt_t *opt, const char *qname);
 
 // high-level mapping APIs
-int mg_map_files(gfa_t *g, int n_fn, const char **fn, const mg_idxopt_t *ipt, const mg_mapopt_t *opt0, int n_threads);
+int mg_map_files(gfa_t *g, int n_fn, const char **fn, const mg_idxopt_t *ipt, const mg_mapopt_t *opt0, int n_threads
+#ifdef TRACEON_BACKEND
+	, FILE *fp_tcache_out /* optional .tgcache dump target (NULL = none) */
+#endif
+);
+#ifdef TRACEON_BACKEND
+int mg_map_idx_files(mg_idx_t *gi, int n_fn, const char **fn, mg_mapopt_t *opt, int n_threads); // tcache load path; does NOT destroy gi
+#endif
 
 // graph generation
 int mg_ggen(gfa_t *g, int32_t n_fn, const char **fn, const mg_idxopt_t *ipt, const mg_mapopt_t *opt0, const mg_ggopt_t *go, int n_threads);

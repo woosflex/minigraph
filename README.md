@@ -234,3 +234,55 @@ highlighted in bold. The description may help to tune minigraph parameters.
 [gfaviz]: https://github.com/ggonnella/gfaviz
 [human-zenodo]: https://zenodo.org/record/6983934
 [agc]: https://github.com/refresh-bio/agc
+
+## <a name="traceon"></a>TracEon build options (this fork)
+
+This fork adds an opt-in TracEon backend; plain `make` is byte-identical to
+upstream r613 (2f569eb) machine code (see the "byte-identity" note below).
+
+* `make TRACEON=1` — backs minigraph's per-bucket khashl `mg_hidx` minimizer
+  table (index.c) with TracEon's `traceon_kmer` C API. Only `mg_hidx` is
+  swapped; the per-bucket position array and every other bucket field stay
+  exactly as upstream, and minigraph's OTHER khashl maps (gfa-base's `h_s2i`,
+  shortk's `sp`/`sp2`, ...) are untouched stock khashl. The final link is
+  driven by `$(CXX)` (mg_traceon_crc.cpp is the only C++ TU; it shims
+  TracEon's header-only `include/Crc32c.h`).
+* The same TRACEON_BACKEND build gains the TG2 `.tgcache` zero-rebuild index
+  cache (`mg_traceon_cache.c` + `mg_traceon_crc.cpp`). minigraph has no
+  .mmi-style dump/load path (it indexes GFA graphs), so this fork adds one:
+
+  ```sh
+  ./minigraph -i ref.tgcache ref.gfa reads.fq   # one-time build (slow path)
+  ./minigraph ref.tgcache reads.fq              # recurring runs: ~zero-rebuild
+  ```
+
+  A `.tgcache` file stores each bucket's minimizer entries as a khashl-style
+  open-addressing slot array + occupancy bitmap (probe order identical to
+  khashl's `__kh_h2b`), plus the graph reference block (segment names,
+  sequences, topology, stable names, link tags, and the derived reverse-
+  complement edseq), so loading is: mmap + one whole-file CRC32C check +
+  pointer fixups + a heap copy of the (small) graph reference block — no
+  minimizer sketch, no radix sort, no table rebuild. The full byte layout is
+  documented at the top of `mg_traceon_cache.c`. Coverage: the plain mapping
+  flow (GAF/PAF), `-c` base alignment, `--cov`; the incremental graph
+  generation flow (`--ggen`/`--call`) rebuilds the index in-process and
+  refuses a `.tgcache` input.
+
+  `-i`/`--index FILE` is the dump trigger; a `.tgcache` magic on the first
+  input selects the loader. `-i` on an already-loaded `.tgcache` re-dumps it
+  (the slot layout is insertion-order dependent, so the re-dump may lay the
+  tables out differently — logical content and output are identical).
+
+Byte-identity: with `TRACEON=0`, every object's machine code (`.text`
+section) is byte-identical to pristine 2f569eb EXCEPT `gfa-ed.o` and
+`miniwfa.o`, which carry a documented upstream-bug workaround required to run
+on this toolchain (see below). The TRACEON guards therefore cannot perturb
+stock codegen.
+
+Upstream-bug workaround: minigraph r613 reads 8 bytes through `char*` at
+arbitrary offsets in `gwf_extend1` (gfa-ed.c) and `wf_extend1_padded`
+(miniwfa.c). GCC 16 vectorizes those raw unaligned u64 casts into 16-byte
+ALIGNED SSE loads (`movdqa`/`movaps`) at `-O3 -msse4`, which SIGSEGV on
+unaligned addresses — reproducible with minigraph's own `test/MT.gfa`. The
+fix replaces the casts with `memcpy`-based loads (a plain unaligned load that
+cannot be miscompiled this way); output is byte-identical to the `-O0` build.

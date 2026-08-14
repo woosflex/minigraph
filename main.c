@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L /* strdup (used by -i/--index in TRACEON builds) */
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -49,6 +50,7 @@ static ko_longopt_t long_options[] = {
 	{ "call",         ko_no_argument,       327 },
 	{ "cap-calloc",   ko_required_argument, 328 },
 	{ "gdp-max-ed",   ko_required_argument, 329 },
+	{ "index",        ko_required_argument, 330 }, // TRACEON: -i/--index <file>.tgcache dump
 	{ "no-kalloc",    ko_no_argument,       401 },
 	{ "dbg-qname",    ko_no_argument,       402 },
 	{ "dbg-lchain",   ko_no_argument,       403 },
@@ -95,7 +97,11 @@ static inline void yes_or_no(uint64_t *flag_, uint64_t f, int long_idx, const ch
 
 int main(int argc, char *argv[])
 {
-	const char *opt_str = "x:k:w:t:r:m:n:g:K:o:p:N:Pq:d:l:f:U:M:F:j:L:DSc";
+	const char *opt_str = "x:k:w:t:r:m:n:g:K:o:p:N:Pq:d:l:f:U:M:F:j:L:DSc"
+#ifdef TRACEON_BACKEND
+		"i:"
+#endif
+	;
 	ketopt_t o = KETOPT_INIT;
 	mg_mapopt_t opt;
 	mg_idxopt_t ipt;
@@ -103,7 +109,11 @@ int main(int argc, char *argv[])
 	int i, c, ret, n_threads = 4;
 	char *s;
 	FILE *fp_help = stderr;
-	gfa_t *g;
+	gfa_t *g = 0;
+#ifdef TRACEON_BACKEND
+	mg_idx_t *gi = 0;
+	char *fn_out = 0; // -i/--index <file>.tgcache
+#endif
 
 	mg_verbose = 3;
 	liftrlimit();
@@ -166,6 +176,9 @@ int main(int argc, char *argv[])
 		else if (c == 327) gpt.flag |= MG_G_CALL, opt.flag |= MG_M_SKIP_GCHECK; // --call
 		else if (c == 328) opt.cap_kalloc = mm_parse_num(o.arg); // --cap-kalloc
 		else if (c == 329) opt.gdp_max_ed = mm_parse_num(o.arg); // --gdp-max-ed
+#ifdef TRACEON_BACKEND
+		else if (c == 'i' || c == 330) fn_out = strdup(o.arg); // -i/--index
+#endif
 		else if (c == 401) mg_dbg_flag |= MG_DBG_NO_KALLOC;   // --no-kalloc
 		else if (c == 402) mg_dbg_flag |= MG_DBG_QNAME;       // --dbg-qname
 		else if (c == 403) mg_dbg_flag |= MG_DBG_LCHAIN;      // --dbg-lchain
@@ -231,6 +244,10 @@ int main(int argc, char *argv[])
 		fprintf(fp_help, "  Indexing:\n");
 		fprintf(fp_help, "    -k INT       k-mer size (no larger than 28) [%d]\n", ipt.k);
 		fprintf(fp_help, "    -w INT       minizer window size [%d]\n", ipt.w);
+#ifdef TRACEON_BACKEND
+		fprintf(fp_help, "    -i FILE      write the index (TracEon .tgcache) to FILE; a .tgcache file as\n");
+		fprintf(fp_help, "                 the first input loads the index with zero table rebuild (TRACEON build only) [off]\n");
+#endif
 		fprintf(fp_help, "  Mapping:\n");
 		fprintf(fp_help, "    -c           perform base alignment; RECOMMENDED\n");
 		fprintf(fp_help, "    -f FLOAT     ignore top FLOAT fraction of repetitive minimizers [%g]\n", opt.occ_max1_frac);
@@ -266,24 +283,91 @@ int main(int argc, char *argv[])
 		return fp_help == stdout? 0 : 1;
 	}
 
-	g = gfa_read(argv[o.ind]);
-	if (g == 0) {
-		fprintf(stderr, "[ERROR] failed to load the graph from file '%s'\n", argv[o.ind]);
-		return 1;
-	} else if (mg_verbose >= 3) {
-		fprintf(stderr, "[M::%s::%.3f*%.2f] loaded the graph from \"%s\"\n", __func__, realtime() - mg_realtime0, cputime() / (realtime() - mg_realtime0), argv[o.ind]);
+	/* --- load the input: a GFA graph, or (TRACEON builds) a .tgcache index --- */
+#ifdef TRACEON_BACKEND
+	if (mg_tcache_is_tcache(argv[o.ind])) { // tcache load path (zero table rebuild)
+		FILE *fp = fopen(argv[o.ind], "rb");
+		if (fp == 0) {
+			fprintf(stderr, "[ERROR] failed to open the index file '%s'\n", argv[o.ind]);
+			return 1;
+		}
+		gi = mg_tcache_load(fp);
+		fclose(fp);
+		if (gi == 0) {
+			fprintf(stderr, "[ERROR] failed to load the index from file '%s'\n", argv[o.ind]);
+			return 1;
+		}
+		g = (gfa_t*)gi->g;
+		if (mg_verbose >= 3)
+			fprintf(stderr, "[M::%s::%.3f*%.2f] loaded the index from \"%s\"\n", __func__, realtime() - mg_realtime0, cputime() / (realtime() - mg_realtime0), argv[o.ind]);
+	} else
+#endif
+	{
+		g = gfa_read(argv[o.ind]);
+		if (g == 0) {
+			fprintf(stderr, "[ERROR] failed to load the graph from file '%s'\n", argv[o.ind]);
+			return 1;
+		} else if (mg_verbose >= 3) {
+			fprintf(stderr, "[M::%s::%.3f*%.2f] loaded the graph from \"%s\"\n", __func__, realtime() - mg_realtime0, cputime() / (realtime() - mg_realtime0), argv[o.ind]);
+		}
 	}
 
 	if (gpt.algo == MG_G_NONE && !(gpt.flag & MG_G_CALL)) {
-		ret = mg_map_files(g, argc - (o.ind + 1), (const char**)&argv[o.ind + 1], &ipt, &opt, n_threads);
+#ifdef TRACEON_BACKEND
+		if (gi) { // prebuilt index: map directly (parameter update runs inside mg_map_idx_files)
+			if (fn_out) { // -i on a tcache input: re-dump (e.g. changed -k/-w are ignored; the dump is a faithful copy)
+				FILE *fo = fopen(fn_out, "wb");
+				if (fo == 0 || mg_tcache_dump(fo, gi) != 0) {
+					fprintf(stderr, "[ERROR] failed to write the tcache file '%s'\n", fn_out);
+					if (fo) fclose(fo);
+					return 1;
+				}
+				fclose(fo);
+			}
+			ret = mg_map_idx_files(gi, argc - (o.ind + 1), (const char**)&argv[o.ind + 1], &opt, n_threads);
+		} else
+#endif
+		{
+#ifdef TRACEON_BACKEND
+			FILE *fp_out = 0;
+			if (fn_out) { // -i on a GFA input: build, dump the .tgcache, then map
+				fp_out = fopen(fn_out, "wb");
+				if (fp_out == 0) {
+					fprintf(stderr, "[ERROR] failed to open the index output file '%s'\n", fn_out);
+					return 1;
+				}
+			}
+#endif
+			ret = mg_map_files(g, argc - (o.ind + 1), (const char**)&argv[o.ind + 1], &ipt, &opt, n_threads
+#ifdef TRACEON_BACKEND
+				, fp_out
+#endif
+			);
+#ifdef TRACEON_BACKEND
+			if (fp_out) fclose(fp_out);
+			if (ret != 0 && fn_out) remove(fn_out); // never leave an empty/truncated dump behind (e.g. unindexable graph)
+#endif
+		}
 	} else {
+#ifdef TRACEON_BACKEND
+		if (gi) {
+			fprintf(stderr, "[ERROR] graph generation (--ggen/--call) needs the GFA graph and cannot run from a .tgcache index; rebuild from the .gfa\n");
+			return 1;
+		}
+#endif
 		if (gpt.flag & MG_G_CALL) gfa_sort_ref_arc(g);
 		ret = mg_ggen(g, argc - (o.ind + 1), (const char**)&argv[o.ind + 1], &ipt, &opt, &gpt, n_threads);
 	}
 
 	if ((gpt.algo != MG_G_NONE || (opt.flag & MG_M_CAL_COV)) && !(gpt.flag & MG_G_CALL))
 		gfa_print(g, stdout, 0);
+#ifdef TRACEON_BACKEND
+	if (gi) mg_idx_destroy(gi); // frees the reconstructed graph (g_own), edseq, and the mmap
+	else gfa_destroy(g);
+	free(fn_out);
+#else
 	gfa_destroy(g);
+#endif
 
 	if (fflush(stdout) == EOF) {
 		fprintf(stderr, "[ERROR] failed to write the results\n");

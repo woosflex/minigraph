@@ -215,8 +215,12 @@ static inline int32_t wf_extend1_padded(const char *ts, const char *qs, int32_t 
 	const char *ts_ = ts + 1;
 	const char *qs_ = qs + d + 1;
 	while (1) {
-		uint64_t x = *(uint64_t*)(ts_ + k); // warning: unaligned memory access
-		uint64_t y = *(uint64_t*)(qs_ + k);
+		uint64_t x, y;
+		/* TRACEON/port note (upstream bug workaround): same unaligned-u64-cast
+		 * hazard as gwf_extend1 in gfa-ed.c — GCC 16 -O3 vectorizes the raw
+		 * casts into faulting aligned SSE loads. memcpy stays a plain load. */
+		memcpy(&x, ts_ + k, 8);
+		memcpy(&y, qs_ + k, 8);
 		cmp = x ^ y;
 		if (cmp == 0) k += 8;
 		else break;

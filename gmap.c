@@ -183,13 +183,26 @@ int mg_map_file_frag(const mg_idx_t *idx, int n_segs, const char **fn, const mg_
 	return 0;
 }
 
-int mg_map_files(gfa_t *g, int n_fn, const char **fn, const mg_idxopt_t *ipt, const mg_mapopt_t *opt0, int n_threads)
+int mg_map_files(gfa_t *g, int n_fn, const char **fn, const mg_idxopt_t *ipt, const mg_mapopt_t *opt0, int n_threads
+#ifdef TRACEON_BACKEND
+				 , FILE *fp_tcache_out // optional .tgcache dump target (NULL = none)
+#endif
+				)
 {
 	mg_mapopt_t opt = *opt0;
 	mg_idx_t *gi;
 	int i, ret = 0;
 	double *cov_seg = 0, *cov_link = 0;
 	if ((gi = mg_index(g, ipt, n_threads, &opt)) == 0) return -1;
+#ifdef TRACEON_BACKEND
+	if (fp_tcache_out) {
+		if (mg_tcache_dump(fp_tcache_out, gi) != 0) {
+			fprintf(stderr, "[ERROR] failed to write the tcache file: the dump aborted partway (short write, e.g. disk/quota full). The output is truncated and will not load; delete it and retry with free space\n");
+			mg_idx_destroy(gi);
+			return -1;
+		}
+	}
+#endif
 	if (opt.flag & MG_M_CAL_COV) {
 		KCALLOC(0, cov_seg,  g->n_seg);
 		KCALLOC(0, cov_link, g->n_arc);
@@ -209,3 +222,33 @@ int mg_map_files(gfa_t *g, int n_fn, const char **fn, const mg_idxopt_t *ipt, co
 	mg_idx_destroy(gi);
 	return ret;
 }
+
+#ifdef TRACEON_BACKEND
+/* tcache load path: map using an already-loaded index. Runs the same
+ * parameter update mg_index() applies on the build path (occ_max1 etc. are
+ * derived from the loaded buckets), then maps. Does NOT destroy gi. */
+int mg_map_idx_files(mg_idx_t *gi, int n_fn, const char **fn, mg_mapopt_t *opt, int n_threads)
+{
+	int i, ret = 0;
+	const gfa_t *g = gi->g;
+	double *cov_seg = 0, *cov_link = 0;
+	mg_opt_update(gi, opt, 0);
+	if (opt->flag & MG_M_CAL_COV) {
+		KCALLOC(0, cov_seg,  g->n_seg);
+		KCALLOC(0, cov_link, g->n_arc);
+	}
+	if (opt->flag & MG_M_FRAG_MODE) {
+		ret = mg_map_file_frag(gi, n_fn, fn, opt, n_threads, cov_seg, cov_link);
+	} else {
+		for (i = 0; i < n_fn; ++i) {
+			ret = mg_map_file_frag(gi, 1, &fn[i], opt, n_threads, cov_seg, cov_link);
+			if (ret != 0) break;
+		}
+	}
+	if (opt->flag & MG_M_CAL_COV) {
+		gfa_aux_update_cv((gfa_t*)g, "dc", cov_seg, cov_link);
+		free(cov_seg); free(cov_link);
+	}
+	return ret;
+}
+#endif

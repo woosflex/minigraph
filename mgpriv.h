@@ -4,6 +4,24 @@
 #include <stdlib.h>
 #include "minigraph.h"
 
+/* The per-bucket minimizer table (mg_hidx, a khashl map) is replaced by
+ * TracEon's kmerindex C API (libtraceon_kmer) in TRACEON builds; the bucket
+ * then additionally carries the tcache-v2 open-addressing fields (see
+ * mg_traceon_cache.c). The position array (p) and the rest of the bucket stay
+ * exactly as upstream in both builds. */
+typedef struct mg_idx_bucket_s {
+	mg128_v a;   // (minimizer, position) array
+	int32_t n;   // size of the _p_ array
+	uint64_t *p; // position array for minimizers appearing >1 times
+	void *h;     // hash table indexing _p_ and minimizers appearing once
+#ifdef TRACEON_BACKEND
+	const uint64_t *fe; // tcache v2: open-addressing slot array (cap*2 u64s; NULL if empty)
+	const uint8_t *bm;  // tcache v2: khashl occupancy bitmap, (cap+31)/32 u32 words (NULL if empty)
+	uint32_t cap;       // tcache v2: table capacity (power of two; 0 if empty)
+	int32_t ne;         // tcache v2: number of occupied slots (== entry count)
+#endif
+} mg_idx_bucket_t;
+
 #define MG_DBG_NO_KALLOC   0x1
 #define MG_DBG_QNAME       0x2
 #define MG_DBG_SEED        0x4
@@ -73,6 +91,16 @@ static inline float mg_log2(float x) // NB: this doesn't work when x<2
 extern unsigned char seq_nt4_table[256];
 
 void mg_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, mg128_v *p);
+
+#ifdef TRACEON_BACKEND
+/* tcache v2 (mg_traceon_cache.c): save the whole index (graph reference block
+ * + per-bucket open-addressing tables) to fp, or load it back from a mapped
+ * file. mg_tcache_is_tcache(fn) detects the format magic. See the format
+ * documentation at the top of mg_traceon_cache.c. */
+int mg_tcache_dump(FILE *fp, const mg_idx_t *gi);
+mg_idx_t *mg_tcache_load(FILE *fp);
+int mg_tcache_is_tcache(const char *fn);
+#endif
 
 void *mg_idx_a2h(void *km, int32_t n_a, mg128_t *a, int suflen, uint64_t **q_, int32_t *n_);
 const uint64_t *mg_idx_hget(const void *h_, const uint64_t *q, int suflen, uint64_t minier, int *n);
